@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>直觀的互動式網絡攝像頭流with多重自定義圖像覆蓋</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
+    <style>
+      /* 保留原有的樣式 */
+      body {
+        font-family: Arial, sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+        background-color: #f0f0f0;
+      }
+      #container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background-color: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        min-width: 640px;
+        min-height: 480px;
+      }
+      #myCanvas {
+        display: none;
+        margin-bottom: 20px;
+        border-radius: 5px;
+      }
+      #controls {
+        display: none;
+        flex-direction: column;
+        gap: 15px;
+        width: 100%;
+      }
+      .effect-group {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .effect-group input[type="file"] {
+        display: none;
+      }
+      .effect-group label {
+        background-color: #4caf50;
+        color: white;
+        padding: 10px 15px;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background-color 0.3s;
+      }
+      .effect-group label:hover {
+        background-color: #45a049;
+      }
+      .effect-group input[type="checkbox"] {
+        width: 20px;
+        height: 20px;
+      }
+      #loadingIndicator {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+      }
+      .loader {
+        border: 5px solid #f3f3f3;
+        border-top: 5px solid #3498db;
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 20px;
+      }
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <canvas id="myCanvas" width="640" height="480"></canvas>
+      <div id="controls">
+        <!-- 保留原有的控制選項 -->
+        <div class="effect-group">
+          <input type="file" id="faceSwapImageUpload" accept="image/*" />
+          <label for="faceSwapImageUpload">上傳換臉圖片</label>
+          <input
+            type="checkbox"
+            id="faceSwapEffect"
+            name="effect"
+            value="faceSwap"
+          />
+          <p for="faceSwapEffect">換臉效果</p>
+        </div>
+        <div class="effect-group">
+          <input type="file" id="kissImageUpload" accept="image/*" />
+          <label for="kissImageUpload">上傳親吻圖片</label>
+          <input
+            type="checkbox"
+            id="kissLeftCheekEffect"
+            name="effect"
+            value="kissLeftCheek"
+          />
+          <p for="faceSwapEffect">親左臉頰效果</p>
+        </div>
+        <div class="effect-group">
+          <input type="file" id="hatImageUpload" accept="image/*" />
+          <label for="hatImageUpload">上傳帽子圖片</label>
+          <input type="checkbox" id="hatEffect" name="effect" value="hat" />
+          <p for="faceSwapEffect">頭頂帽子效果</p>
+        </div>
+        <!-- 新增墨鏡效果的控制選項 -->
+        <div class="effect-group">
+          <input type="file" id="sunglassesImageUpload" accept="image/*" />
+          <label for="sunglassesImageUpload">上傳墨鏡圖片</label>
+          <input
+            type="checkbox"
+            id="sunglassesEffect"
+            name="effect"
+            value="sunglasses"
+          />
+          <p for="faceSwapEffect">戴墨鏡效果</p>
+        </div>
+      </div>
+      <div id="loadingIndicator">
+        <div class="loader"></div>
+        <div id="loadingText">初始化中...</div>
+      </div>
+    </div>
+    <script>
+      const socket = io();
+      let faceDetectModel;
+      let faceSwapImage = null;
+      let kissImage = null;
+      let hatImage = null;
+      let sunglassesImage = null;
+      let activeEffects = new Set();
+
+      const updateLoadingText = (text) => {
+        document.getElementById("loadingText").innerText = text;
+      };
+
+      const loadModels = async () => {
+        updateLoadingText("加載人臉檢測模型中...");
+        faceDetectModel = await blazeface.load();
+        console.log("blazeface model loaded");
+
+        updateLoadingText("初始化攝像頭...");
+        drawVideo();
+      };
+
+      const drawVideo = () => {
+        const canvas = document.getElementById("myCanvas");
+        const context = canvas.getContext("2d");
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then((stream) => {
+            const video = document.createElement("video");
+            video.srcObject = stream;
+            video.play();
+            video.addEventListener("loadeddata", () => {
+              document.getElementById("loadingIndicator").style.display =
+                "none";
+              canvas.style.display = "block";
+              document.getElementById("controls").style.display = "flex";
+              detectFace(video);
+            });
+          })
+          .catch((error) => {
+            console.error("獲取視訊失敗:", error);
+            updateLoadingText("無法訪問攝像頭，請檢查權限設置。");
+          });
+      };
+
+      const detectFace = async (video) => {
+        const canvas = document.getElementById("myCanvas");
+        const context = canvas.getContext("2d");
+
+        const detect = async () => {
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            const facePredictions = await faceDetectModel.estimateFaces(
+              video,
+              false
+            );
+
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            if (facePredictions && Array.isArray(facePredictions)) {
+              facePredictions.forEach((face) => {
+                const topLeft = face.topLeft;
+                const bottomRight = face.bottomRight;
+                const faceWidth = bottomRight[0] - topLeft[0];
+                const faceHeight = bottomRight[1] - topLeft[1];
+
+                if (activeEffects.has("faceSwap") && faceSwapImage) {
+                  const imageAspectRatio =
+                    faceSwapImage.width / faceSwapImage.height;
+                  const faceAspectRatio = faceWidth / faceHeight;
+                  let scaleFactor;
+
+                  if (imageAspectRatio > faceAspectRatio) {
+                    scaleFactor = faceHeight / faceSwapImage.height;
+                  } else {
+                    scaleFactor = faceWidth / faceSwapImage.width;
+                  }
+
+                  scaleFactor *= 1;
+
+                  const newWidth = faceSwapImage.width * scaleFactor;
+                  const newHeight = faceSwapImage.height * scaleFactor;
+                  const offsetX = (newWidth - faceWidth) / 2;
+                  const offsetY = (newHeight - faceHeight) / 2;
+
+                  drawCustomImage(
+                    context,
+                    faceSwapImage,
+                    topLeft[0] - offsetX,
+                    topLeft[1] - offsetY,
+                    newWidth,
+                    newHeight
+                  );
+                }
+
+                if (activeEffects.has("kissLeftCheek") && kissImage) {
+                  const kissImageSize = faceWidth * 0.8;
+                  const leftCheekX = topLeft[0] - kissImageSize * 0.6;
+                  const leftCheekY = topLeft[1] + faceHeight * 0.3;
+
+                  context.save();
+                  context.translate(
+                    leftCheekX + kissImageSize / 2,
+                    leftCheekY + kissImageSize / 2
+                  );
+                  context.rotate(-Math.PI / 12);
+                  drawCustomImage(
+                    context,
+                    kissImage,
+                    -kissImageSize / 2,
+                    -kissImageSize / 2,
+                    kissImageSize,
+                    kissImageSize
+                  );
+                  context.restore();
+                }
+
+                if (activeEffects.has("hat") && hatImage) {
+                  const hatWidth = faceWidth * 1.2;
+                  const hatHeight =
+                    hatWidth * (hatImage.height / hatImage.width);
+                  const hatX = topLeft[0] - (hatWidth - faceWidth) / 2;
+                  const hatY = topLeft[1] - hatHeight * 0.8;
+
+                  drawCustomImage(
+                    context,
+                    hatImage,
+                    hatX,
+                    hatY,
+                    hatWidth,
+                    hatHeight
+                  );
+                }
+
+                // 新增墨鏡效果
+                if (activeEffects.has("sunglasses") && sunglassesImage) {
+                  const sunglassesWidth = faceWidth * 1;
+                  const sunglassesHeight =
+                    sunglassesWidth *
+                    (sunglassesImage.height / sunglassesImage.width);
+                  const sunglassesX =
+                    topLeft[0] - (sunglassesWidth - faceWidth) / 2;
+                  const sunglassesY = topLeft[1] + faceHeight * 0.25; // 調整位置以對準眼睛
+
+                  drawCustomImage(
+                    context,
+                    sunglassesImage,
+                    sunglassesX,
+                    sunglassesY,
+                    sunglassesWidth,
+                    sunglassesHeight
+                  );
+                }
+              });
+            }
+
+            const imageData = canvas.toDataURL("image/png");
+
+            //暫時隱藏 socket
+            socket.emit("recognized-image", imageData);
+          }
+          requestAnimationFrame(detect);
+        };
+        detect();
+      };
+
+      const drawCustomImage = (context, image, x, y, width, height) => {
+        if (image) {
+          context.drawImage(image, x, y, width, height);
+        }
+      };
+
+      document
+        .getElementById("faceSwapImageUpload")
+        .addEventListener("change", (event) => {
+          const file = event.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              faceSwapImage = new Image();
+              faceSwapImage.onload = () => {
+                console.log("Face swap image loaded");
+              };
+              faceSwapImage.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+
+      document
+        .getElementById("kissImageUpload")
+        .addEventListener("change", (event) => {
+          const file = event.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              kissImage = new Image();
+              kissImage.onload = () => {
+                console.log("Kiss image loaded");
+              };
+              kissImage.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+
+      document
+        .getElementById("hatImageUpload")
+        .addEventListener("change", (event) => {
+          const file = event.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              hatImage = new Image();
+              hatImage.onload = () => {
+                console.log("Hat image loaded");
+              };
+              hatImage.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+
+      // 新增墨鏡圖片上傳處理
+      document
+        .getElementById("sunglassesImageUpload")
+        .addEventListener("change", (event) => {
+          const file = event.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              sunglassesImage = new Image();
+              sunglassesImage.onload = () => {
+                console.log("Sunglasses image loaded");
+              };
+              sunglassesImage.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+
+      document.querySelectorAll('input[name="effect"]').forEach((checkbox) => {
+        checkbox.addEventListener("change", (event) => {
+          if (event.target.checked) {
+            activeEffects.add(event.target.value);
+          } else {
+            activeEffects.delete(event.target.value);
+          }
+        });
+      });
+
+      loadModels();
+    </script>
+  </body>
+</html>

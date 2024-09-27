@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Multi-Person Webcam Stream with Crown and Wings</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+    <style>
+      #container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        position: relative;
+      }
+      #myCanvas {
+        display: none;
+      }
+      #loadingIndicator {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        font-family: Arial, sans-serif;
+      }
+      .loader {
+        border: 5px solid #f3f3f3;
+        border-top: 5px solid #3498db;
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 20px;
+      }
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <canvas id="myCanvas" width="640" height="480"></canvas>
+      <div id="loadingIndicator">
+        <div class="loader"></div>
+        <div id="loadingText">初始化中...</div>
+      </div>
+    </div>
+    <script>
+      const socket = io(); // 初始化 Socket.IO
+      let faceDetectModel;
+      let poseDetectionModel;
+
+      const updateLoadingText = (text) => {
+        document.getElementById("loadingText").innerText = text;
+      };
+
+      const loadModels = async () => {
+        updateLoadingText("加載人臉檢測模型中...");
+        faceDetectModel = await blazeface.load();
+        console.log("blazeface model loaded");
+
+        updateLoadingText("加載人體姿勢檢測模型中...");
+        const detectorConfig = {
+          modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
+        };
+        poseDetectionModel = await poseDetection.createDetector(
+          poseDetection.SupportedModels.MoveNet,
+          detectorConfig
+        );
+        console.log("movenet model loaded");
+
+        updateLoadingText("初始化攝像頭...");
+        drawVideo();
+      };
+
+      const drawVideo = () => {
+        const canvas = document.getElementById("myCanvas");
+        const context = canvas.getContext("2d");
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then((stream) => {
+            const video = document.createElement("video");
+            video.srcObject = stream;
+            video.play();
+            video.addEventListener("loadeddata", () => {
+              document.getElementById("loadingIndicator").style.display =
+                "none";
+              canvas.style.display = "block";
+              detectFaceAndBody(video);
+            });
+          })
+          .catch((error) => {
+            console.error("獲取視訊失敗:", error);
+            updateLoadingText("無法訪問攝像頭，請檢查權限設置。");
+          });
+      };
+
+      const detectFaceAndBody = async (video) => {
+        const canvas = document.getElementById("myCanvas");
+        const context = canvas.getContext("2d");
+
+        const detect = async () => {
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            const facePredictions = await faceDetectModel.estimateFaces(
+              video,
+              false
+            );
+            const posePredictions = await poseDetectionModel.estimatePoses(
+              video
+            );
+
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // 繪製所有檢測到的皇冠
+            if (facePredictions && Array.isArray(facePredictions)) {
+              facePredictions.forEach((face) => {
+                const topLeft = face.topLeft;
+                const bottomRight = face.bottomRight;
+                const faceWidth = bottomRight[0] - topLeft[0];
+                const faceHeight = bottomRight[1] - topLeft[1];
+
+                // 計算縮放因子
+                const scaleFactor = Math.min(1, faceWidth / 100); // 假設標準臉寬為100像素
+
+                drawCrown(
+                  context,
+                  topLeft[0] + faceWidth / 2,
+                  topLeft[1],
+                  faceWidth,
+                  scaleFactor
+                );
+              });
+            }
+
+            // 繪製所有檢測到的翅膀
+            if (posePredictions && Array.isArray(posePredictions)) {
+              posePredictions.forEach((pose) => {
+                const keypoints = pose.keypoints;
+                const leftShoulder = keypoints.find(
+                  (k) => k.name === "left_shoulder"
+                );
+                const rightShoulder = keypoints.find(
+                  (k) => k.name === "right_shoulder"
+                );
+
+                if (leftShoulder && rightShoulder) {
+                  const shoulderDistance = Math.sqrt(
+                    Math.pow(rightShoulder.x - leftShoulder.x, 2) +
+                      Math.pow(rightShoulder.y - leftShoulder.y, 2)
+                  );
+
+                  // 計算縮放因子
+                  const scaleFactor = Math.min(1, shoulderDistance / 150); // 假設標準肩寬為150像素
+
+                  drawWing(
+                    context,
+                    leftShoulder.x,
+                    leftShoulder.y,
+                    "left",
+                    shoulderDistance,
+                    scaleFactor
+                  );
+                  drawWing(
+                    context,
+                    rightShoulder.x,
+                    rightShoulder.y,
+                    "right",
+                    shoulderDistance,
+                    scaleFactor
+                  );
+                }
+              });
+            }
+
+            const imageData = canvas.toDataURL("image/png");
+            socket.emit("recognized-image", imageData);
+          }
+          requestAnimationFrame(detect);
+        };
+        detect();
+      };
+
+      const drawCrown = (context, x, y, faceWidth, scaleFactor) => {
+        const crownWidth = faceWidth * 1.2 * scaleFactor;
+        const crownHeight = crownWidth * 0.6;
+
+        context.save();
+        context.translate(x, y);
+
+        // 繪製皇冠主體
+        context.beginPath();
+        context.moveTo(-crownWidth / 2, 0);
+        context.lineTo(-crownWidth / 2, -crownHeight * 0.7);
+        context.lineTo(-crownWidth / 4, -crownHeight * 0.4);
+        context.lineTo(0, -crownHeight);
+        context.lineTo(crownWidth / 4, -crownHeight * 0.4);
+        context.lineTo(crownWidth / 2, -crownHeight * 0.7);
+        context.lineTo(crownWidth / 2, 0);
+        context.closePath();
+
+        // 填充皇冠
+        context.fillStyle = "gold";
+        context.fill();
+
+        // 皇冠輪廓
+        context.strokeStyle = "darkgoldenrod";
+        context.lineWidth = 2 * scaleFactor;
+        context.stroke();
+
+        // 添加寶石
+        const gemPositions = [-0.3, 0, 0.3];
+        gemPositions.forEach((pos) => {
+          context.beginPath();
+          context.arc(
+            crownWidth * pos,
+            -crownHeight * 0.6,
+            crownWidth * 0.06,
+            0,
+            Math.PI * 2
+          );
+          context.fillStyle = "red";
+          context.fill();
+          context.strokeStyle = "darkred";
+          context.stroke();
+        });
+
+        context.restore();
+      };
+
+      const drawWing = (context, x, y, side, shoulderDistance, scaleFactor) => {
+        const wingLength = shoulderDistance * 1.5 * scaleFactor;
+        const wingWidth = shoulderDistance * 0.75 * scaleFactor;
+
+        context.save();
+        context.translate(x, y);
+        if (side === "right") {
+          context.scale(-1, 1);
+        }
+
+        context.beginPath();
+        context.moveTo(0, 0);
+        context.quadraticCurveTo(wingLength / 2, -wingWidth, wingLength, 0);
+        context.quadraticCurveTo(wingLength / 2, wingWidth / 2, 0, 0);
+
+        context.fillStyle = "rgba(255, 255, 255, 0.7)";
+        context.fill();
+
+        context.strokeStyle = "rgba(0, 0, 0, 0.5)";
+        context.lineWidth = 2 * scaleFactor;
+        context.stroke();
+
+        context.restore();
+      };
+
+      loadModels();
+    </script>
+  </body>
+</html>
